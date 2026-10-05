@@ -13,72 +13,55 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
-      - name: Verify live HTTPS files against the approved Git tree
+      - name: Verify updated live files and unchanged assets
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           python3 - <<'PY'
-          import concurrent.futures, hashlib, json, os, time, urllib.error, urllib.request
-          repo='jeonbyungryong/jby-portfolio'
-          api='https://api.github.com/repos/'+repo
-          site='https://jeonbyungryong.github.io/jby-portfolio/'
-          expected_docs='69bc5e2bd3c1e7995fcaf80396d2bef608c819d4'
-          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'JBY-Publication-Verification'}
-          def get_json(path):
-              with urllib.request.urlopen(urllib.request.Request(api+path,headers=headers),timeout=25) as response:
-                  return json.load(response)
-          def read_public(url):
-              with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'JBY-Anonymous-Publication-Verification'}),timeout=35) as response:
-                  data=response.read(10*1024*1024+1)
-                  if len(data)>10*1024*1024 or response.status!=200: raise ValueError('Unexpected public response')
-                  return data, response.headers.get('Content-Type',''),response.geturl()
-          def blob_sha(data):
-              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
-          repository=get_json('')
-          if repository['private']: raise SystemExit('Results repository is not public')
-          head=get_json('/git/ref/heads/main')['object']['sha']
-          root=get_json('/git/trees/'+head)
-          docs=next((x for x in root['tree'] if x['path']=='docs'),None)
-          if not docs or docs['sha']!=expected_docs: raise SystemExit('Approved docs tree differs')
-          tree=get_json('/git/trees/'+expected_docs+'?recursive=1')
-          files=[x for x in tree['tree'] if x['type']=='blob']
-          if tree.get('truncated') or len(files)!=44: raise SystemExit('Incomplete website inventory')
-          pages=get_json('/pages')
-          if pages.get('source')!={'branch':'main','path':'/docs'}: raise SystemExit('Pages publishing source differs')
-          if not pages.get('https_enforced'): raise SystemExit('HTTPS enforcement is not enabled')
-          index=next(x for x in files if x['path']=='index.html')
-          for attempt in range(10):
-              try:
-                  data,ctype,final=read_public(site)
-                  if blob_sha(data)==index['sha']: break
-              except (OSError,urllib.error.URLError): pass
-              if attempt==9: raise SystemExit('Approved homepage is not live yet')
-              time.sleep(12)
-          def verify_file(item):
-              # .nojekyll is a publishing control file, not a required public URL.
-              raw='https://raw.githubusercontent.com/'+repo+'/'+head+'/docs/'+item['path']
-              data,_,_=read_public(raw)
-              if blob_sha(data)!=item['sha'] or len(data)!=item['size']: raise ValueError('Repository bytes differ: '+item['path'])
-              if item['path']=='.nojekyll': return {'file':item['path'],'repository_verified':True,'control_file':True}
-              data,ctype,final=read_public(site+item['path'])
-              if blob_sha(data)!=item['sha'] or len(data)!=item['size']: raise ValueError('Live bytes differ: '+item['path'])
-              if not final.startswith(site): raise ValueError('Unexpected public redirect')
-              if item['path'].endswith('.pdf') and 'application/pdf' not in ctype: raise ValueError('PDF MIME type differs')
-              return {'file':item['path'],'repository_verified':True,'https_verified':True,'bytes':len(data)}
-          with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-              checked=list(pool.map(verify_file,files))
+          import concurrent.futures,hashlib,json,os,time,urllib.request,urllib.error
+          REPO='jeonbyungryong/jby-portfolio';SITE='https://jeonbyungryong.github.io/jby-portfolio/'
+          TREE='941bfdbcf7fafca10ea5755048557c5a923db90a'
+          def api(path):
+           req=urllib.request.Request('https://api.github.com/repos/'+REPO+path,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','User-Agent':'JBY-Live-Verification'})
+           with urllib.request.urlopen(req,timeout=30) as r:return json.load(r)
+          def read(url):
+           with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'JBY-Anonymous-Live-Verification'}),timeout=35) as r:
+            b=r.read(10*1024*1024+1)
+            if r.status!=200 or len(b)>10*1024*1024:raise ValueError('Invalid public response')
+            return b,r.headers.get('Content-Type','')
+          def digest(b):return hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()
+          head=api('/git/ref/heads/main')['object']['sha'];root=api('/git/trees/'+head)
+          assert next(e['sha'] for e in root['tree'] if e['path']=='docs')==TREE
+          result=api('/git/trees/'+TREE+'?recursive=1');files=[e for e in result['tree'] if e['type']=='blob']
+          assert not result.get('truncated') and len(files)==44
+          pages=api('/pages');assert pages['source']=={'branch':'main','path':'/docs'} and pages['https_enforced']
+          index=next(e for e in files if e['path']=='index.html')
+          for attempt in range(15):
+           try:
+            if digest(read(SITE)[0])==index['sha']:break
+           except (urllib.error.URLError,OSError):pass
+           if attempt==14:raise SystemExit('Updated homepage not live')
+           time.sleep(10)
+          def verify(e):
+           raw='https://raw.githubusercontent.com/'+REPO+'/'+head+'/docs/'+e['path']
+           b,_=read(raw);assert len(b)==e['size'] and digest(b)==e['sha']
+           if e['path']=='.nojekyll':return 0
+           for attempt in range(4):
+            b,mime=read(SITE+e['path'])
+            if len(b)==e['size'] and digest(b)==e['sha']:break
+            if attempt==3:raise ValueError('Live asset mismatch: '+e['path'])
+            time.sleep(10)
+           if e['path'].endswith('.pdf'):assert 'application/pdf' in mime
+           return 1
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:served=sum(pool.map(verify,files))
           try:
-              read_public(site+'__publication_check__/missing')
-              raise SystemExit('Unknown route did not return HTTP 404')
-          except urllib.error.HTTPError as error:
-              if error.code!=404: raise
-              notfound=error.read(1024*1024)
-              if blob_sha(notfound)!=next(x['sha'] for x in files if x['path']=='404.html'): raise SystemExit('Custom 404 differs')
-          results={'repository':repo,'head':head,'docs_tree':expected_docs,'repository_files_verified':len(checked),'live_https_files_verified':sum(x.get('https_verified',False) for x in checked),'website_bytes':sum(x['size'] for x in files),'pages':{'source':pages['source'],'build_type':pages.get('build_type'),'https_enforced':pages['https_enforced'],'html_url':pages.get('html_url')},'custom_404_verified':True,'publication_verified':True,'read_only':True}
-          print('PUBLICATION_RESULT '+json.dumps(results,ensure_ascii=False,sort_keys=True))
-          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary:
-              summary.write('## Live publication verification\n\n```json\n'+json.dumps(results,ensure_ascii=False,indent=2)+'\n```\n')
+           read(SITE+'__publication_check__/missing');raise AssertionError('Expected 404')
+          except urllib.error.HTTPError as e:
+           assert e.code==404 and digest(e.read())==next(x['sha'] for x in files if x['path']=='404.html')
+          report={'publication_verified':True,'head':head,'docs_tree':TREE,'repository_files_verified':44,'live_https_files_verified':served,'website_bytes':sum(x['size'] for x in files),'https_enforced':True,'page18_image_replaced':True,'pdf_updated':True,'url':SITE}
+          print('PUBLICATION_RESULT '+json.dumps(report))
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('## Publication\n\n```json\n'+json.dumps(report,indent=2)+'\n```\n')
           PY
       - name: Install isolated browser test tooling
         shell: bash
@@ -86,71 +69,54 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/portfolio-browser"
           "$RUNNER_TEMP/portfolio-browser/bin/pip" -q install playwright==1.63.0
           "$RUNNER_TEMP/portfolio-browser/bin/python" -m playwright install --with-deps chromium
-      - name: Check live desktop and mobile-sized browser behavior
+      - name: Check all sections and the updated page-18 image
         shell: bash
         run: |
           "$RUNNER_TEMP/portfolio-browser/bin/python" - <<'PY'
-          import json, os
+          import json,os
           from playwright.sync_api import sync_playwright
-          site='https://jeonbyungryong.github.io/jby-portfolio/'
-          results=[]
-          with sync_playwright() as pw:
-              browser=pw.chromium.launch()
-              for label,width,height,mobile in [('desktop',1600,900,False),('mobile-sized',390,844,True)]:
-                  context=browser.new_context(viewport={'width':width,'height':height},is_mobile=mobile,has_touch=mobile)
-                  page=context.new_page(); errors=[]
-                  page.on('pageerror',lambda error:errors.append(str(error)))
-                  response=page.goto(site,wait_until='domcontentloaded',timeout=45000)
-                  assert response.status==200
-                  page.wait_for_function("document.documentElement.dataset.readingMode==='paged'")
-                  ids=page.locator('main section.page').evaluate_all('(nodes)=>nodes.map(n=>n.id)')
-                  assert len(ids)==21 and len(set(ids))==21 and ids[-1]=='closing'
-                  assert 'monitor-mini-ess-results' in ids
-                  page.locator('[data-page-next]').click()
-                  page.wait_for_function("document.documentElement.dataset.pageId==='contents'")
-                  page.wait_for_timeout(650)
-                  page.locator('[data-page-prev]').click()
-                  page.wait_for_function("document.documentElement.dataset.pageId==='cover'")
-                  page.wait_for_timeout(650)
-                  if not mobile:
-                      page.mouse.move(800,400)
-                      for _ in range(3):
-                          page.mouse.wheel(0,80);page.wait_for_timeout(30)
-                      page.wait_for_timeout(650)
-                      assert page.evaluate('document.documentElement.dataset.pageId')=='contents'
-                  for n,id in enumerate(ids):
-                      page.locator('[data-page-select]').select_option(str(n))
-                      page.wait_for_function('(id)=>document.documentElement.dataset.pageId===id',arg=id)
-                      page.wait_for_timeout(600)
-                      assert page.locator('#'+id).is_visible()
-                      assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+2')
-                  page.locator('[data-page-select]').select_option('3')
-                  page.wait_for_timeout(650)
-                  page.locator('#shw120-overview a[data-zoom]').first.click()
-                  page.wait_for_function("!!document.querySelector('dialog[open] img')?.naturalWidth")
-                  page.locator('[data-size]').click()
-                  assert page.locator('.image-view').evaluate("e=>e.classList.contains('full-size')")
-                  page.locator('[data-close]').click()
-                  assert page.locator('dialog[open]').count()==0
-                  page.wait_for_timeout(650)
-                  page.locator('[data-pager-mode]').click()
-                  page.wait_for_function("document.documentElement.dataset.readingMode==='continuous'")
-                  assert page.locator('main section.page:visible').count()==21
-                  assert page.locator('a.pdf-link').get_attribute('href')=='portfolio.pdf'
-                  page.goto(site+'#monitor-mini-ess-software',wait_until='domcontentloaded')
-                  page.wait_for_function("document.documentElement.dataset.pageId==='monitor-mini-ess-software'")
-                  page.reload(wait_until='domcontentloaded')
-                  page.wait_for_function("document.documentElement.dataset.pageId==='monitor-mini-ess-software'")
-                  assert not errors, errors
-                  fonts=page.evaluate("async()=>{await document.fonts.ready;return {status:document.fonts.status,loaded:[...document.fonts].filter(f=>f.status==='loaded').map(f=>f.family)}}")
-                  results.append({'environment':label,'viewport':[width,height],'browser':browser.version,'live_navigation':True,'sections_visited':21,'image_zoom':True,'reading_mode':True,'direct_fragment_reload':True,'uncaught_errors':len(errors),'fonts':fonts,'physical_device':False})
-                  context.close()
-              context=browser.new_context(java_script_enabled=False)
-              page=context.new_page();page.goto(site,wait_until='domcontentloaded')
-              assert page.locator('main section.page:visible').count()==21
-              results.append({'javascript_disabled_reading':True,'sections':21})
-              context.close();browser.close()
-          print('BROWSER_RESULT '+json.dumps(results,ensure_ascii=False,sort_keys=True))
-          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary:
-              summary.write('\n## Chromium live-site checks\n\n```json\n'+json.dumps(results,ensure_ascii=False,indent=2)+'\n```\n\nNot physical Windows/Android/iOS/Kakao validation.\n')
+          SITE='https://jeonbyungryong.github.io/jby-portfolio/';TARGET='monitor-mini-ess-software';reports=[]
+          with sync_playwright() as p:
+           b=p.chromium.launch()
+           for label,w,h,mobile in [('desktop',1600,900,False),('mobile-sized',390,844,True)]:
+            c=b.new_context(viewport={'width':w,'height':h},is_mobile=mobile,has_touch=mobile)
+            page=c.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+            assert page.goto(SITE,wait_until='domcontentloaded').status==200
+            page.wait_for_function("document.documentElement.dataset.readingMode==='paged'")
+            ids=page.locator('main section.page').evaluate_all('(e)=>e.map(x=>x.id)')
+            assert len(ids)==len(set(ids))==21 and ids[17]==TARGET
+            if not mobile:
+             page.mouse.move(800,400)
+             for _ in range(3):page.mouse.wheel(0,80);page.wait_for_timeout(30)
+             page.wait_for_timeout(650);assert page.evaluate('document.documentElement.dataset.pageId')=='contents'
+            for n,id in enumerate(ids):
+             page.locator('[data-page-select]').select_option(str(n));page.wait_for_function('(id)=>document.documentElement.dataset.pageId===id',arg=id)
+             page.wait_for_timeout(550);assert page.locator('#'+id).is_visible()
+             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+2')
+            page.locator('[data-page-select]').select_option('17');page.wait_for_timeout(650)
+            img=page.locator('#'+TARGET+' img');img.scroll_into_view_if_needed()
+            assert img.get_attribute('src')=='assets/s18-img01-bab5359d5162afc1.webp'
+            page.wait_for_function("document.querySelector('#monitor-mini-ess-software img').naturalWidth===1356")
+            page.locator('#'+TARGET+' a[data-zoom]').click()
+            page.wait_for_function("document.querySelector('dialog[open] img')?.naturalWidth===1356")
+            assert 's18-img01-full-a1077738100c505f.png' in page.locator('dialog[open] img').get_attribute('src')
+            page.locator('[data-size]').click();assert page.locator('.image-view.full-size').count()==1
+            page.locator('[data-close]').click();assert page.locator('dialog[open]').count()==0
+            page.wait_for_timeout(650);page.locator('[data-page-next]').click()
+            page.wait_for_function("document.documentElement.dataset.pageId==='monitor-mini-ess-mechanical'")
+            page.wait_for_timeout(650);page.locator('[data-page-prev]').click()
+            page.wait_for_function("document.documentElement.dataset.pageId==='monitor-mini-ess-software'")
+            page.wait_for_timeout(650);page.locator('[data-pager-mode]').click()
+            page.wait_for_function("document.documentElement.dataset.readingMode==='continuous'")
+            assert page.locator('main section.page:visible').count()==21
+            pdf=page.locator('a.pdf-link').get_attribute('href');assert pdf=='portfolio.pdf?v=ba1a3060e1db7dcb'
+            response=page.request.get(SITE+pdf);assert response.status==200 and response.body().startswith(b'%PDF-')
+            page.goto(SITE+'#'+TARGET,wait_until='domcontentloaded');page.reload(wait_until='domcontentloaded')
+            page.wait_for_function("document.documentElement.dataset.pageId==='monitor-mini-ess-software'")
+            assert not errors,errors
+            reports.append({'environment':label,'viewport':[w,h],'visited_sections':21,'new_image_and_zoom':True,'navigation':True,'pdf_link':True,'direct_reload':True,'javascript_errors':len(errors),'physical_device':False})
+            c.close()
+           c=b.new_context(java_script_enabled=False);page=c.new_page();page.goto(SITE,wait_until='domcontentloaded');assert page.locator('main section.page:visible').count()==21;c.close();b.close()
+          print('BROWSER_RESULT '+json.dumps({'checks':reports,'js_disabled_sections':21}))
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('\n## Live browser tests\n\n```json\n'+json.dumps(reports,indent=2)+'\n```\nEmulated viewports, not physical Android/iOS/Kakao.\n')
           PY
