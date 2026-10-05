@@ -17,7 +17,7 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import base64, hashlib, io, json, os, pathlib, stat, urllib.request, zipfile
+          import base64, hashlib, http.cookiejar, io, json, os, pathlib, stat, urllib.request, zipfile
           REPO='jeonbyungryong/jby-portfolio'
           SHARE='https://1drv.ms/u/c/b377fcde1431cc70/IQAhX5vZ5nsKTIammvvlIRSfAQtAPRRoUb_ayksEAqN0yf0'
           ZIP_SHA='7f626889483aa17f15b115039c9d602bc5a22adbc46a635407f3ba7d9c0ef5ec'
@@ -44,8 +44,8 @@ jobs:
             u=urlsplit(newurl);h=(u.hostname or '').lower()
             if u.scheme!='https' or u.username or u.password or not (h=='1drv.ms' or any(h==d or h.endswith('.'+d) for d in ['live.com','onedrive.com','1drv.com','microsoftpersonalcontent.com','sharepoint.com'])):raise ValueError('Unexpected transfer host')
             return super().redirect_request(req,fp,code,msg,headers,newurl)
-          opener=urllib.request.build_opener(SafeRedirect())
-          with opener.open(urllib.request.Request(SHARE+'?download=1',headers={'User-Agent':'JBY-Approved-Public-File-Transfer'}),timeout=60) as r:
+          opener=urllib.request.build_opener(SafeRedirect(),urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+          with opener.open(urllib.request.Request(SHARE+'?download=1',headers={'User-Agent':'Mozilla/5.0 JBY-Portfolio-Approved-Transfer'}),timeout=60) as r:
            raw=r.read(4*1024*1024+1)
           if len(raw)!=3367385 or hashlib.sha256(raw).hexdigest()!=ZIP_SHA:raise SystemExit('Transfer ZIP mismatch')
           files={}
